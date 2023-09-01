@@ -8,7 +8,12 @@ import {
   ScrollView,
   Text,
 } from 'react-native';
-import BleManager, {Peripheral} from 'react-native-ble-manager';
+import BleManager, {
+  BleScanCallbackType,
+  BleScanMatchMode,
+  BleScanMode,
+  Peripheral,
+} from 'react-native-ble-manager';
 import {Buffer} from 'buffer';
 import Button from './src/Button';
 import {Column} from './src/Column';
@@ -18,36 +23,31 @@ type IScannedDevice = Peripheral & {
 
 const BleManagerModule = NativeModules.BleManager;
 const BleManagerEmitter = new NativeEventEmitter(BleManagerModule);
-const {BLUETOOTH_SCAN, BLUETOOTH_CONNECT} = PermissionsAndroid.PERMISSIONS;
+const {BLUETOOTH_SCAN, BLUETOOTH_CONNECT, ACCESS_FINE_LOCATION} =
+  PermissionsAndroid.PERMISSIONS;
 
 const App = () => {
-  const [isScanPermissionAllowed, setIsScanPermissionAllowed] = useState(false);
+  const [isPermissionAllowed, setIsPermissionAllowed] = useState(false);
   const [isBluetoothEnabled, setIsBluetoothEnabled] = useState(false);
   const [isModuleEnabled, setIsModuleEnabled] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [isAnyDeviceScanned, setAnyDeviceScanned] = useState(false);
-  const [scannedDevices, setScannedDevices] = useState<IScannedDevice[]>([]);
+  const [scannedDevices, setScannedDevices] = useState<Peripheral[]>([]);
   const [connectedDevice, setConnectedDevice] = useState<
-    IScannedDevice | undefined
+    Peripheral[] | undefined
   >();
+  // 40:35:E6:4D:06:C8
 
-  const checkAndRequestBluetoothPermission = async (permission: Permission) => {
-    PermissionsAndroid.check(permission).then(alreadyAllowed => {
-      if (alreadyAllowed) {
-        return setIsScanPermissionAllowed(true);
-      }
-
-      PermissionsAndroid.request(permission).then(res =>
-        setIsScanPermissionAllowed(res === 'granted'),
-      );
-    });
-  };
-
-  const handleAllowBluetoothPermission = async () => {
-    await Promise.allSettled([
-      checkAndRequestBluetoothPermission(BLUETOOTH_SCAN),
-      checkAndRequestBluetoothPermission(BLUETOOTH_CONNECT),
+  const checkAndRequestBluetoothPermission = async () => {
+    const permissions = await PermissionsAndroid.requestMultiple([
+      BLUETOOTH_CONNECT,
+      BLUETOOTH_SCAN,
     ]);
+
+    setIsPermissionAllowed(
+      permissions[BLUETOOTH_CONNECT] === 'granted' &&
+        permissions[BLUETOOTH_SCAN] === 'granted',
+    );
   };
 
   const handleEnableBluetooth = () => {
@@ -64,10 +64,51 @@ const App = () => {
     });
   };
 
+  const retrievePeripheralService = async (deviceId: string) => {
+    try {
+      const peripheralInfo = await BleManager.retrieveServices(deviceId);
+      console.log(peripheralInfo);
+      return peripheralInfo;
+    } catch (error) {
+      console.error('[Retrieve Error]', error);
+    }
+  };
+
+  const createPeripheralBond = async (deviceId: string) => {
+    try {
+      await BleManager.createBond(deviceId);
+      await retrievePeripheralService(deviceId);
+    } catch (error) {
+      console.error('[CreateBond Error]', error);
+    }
+  };
+
   const handleStartScan = () => {
-    BleManager.scan([], 5, true).then(() => {
+    BleManager.scan([], 5, true, {
+      matchMode: BleScanMatchMode.Sticky,
+      scanMode: BleScanMode.LowLatency,
+      callbackType: BleScanCallbackType.AllMatches,
+    }).then(() => {
       // Success code
       setIsScanning(true);
+    });
+  };
+
+  const storeDiscoveredPeripheral = (device: Peripheral) => {
+    if (!device.name) {
+      return;
+    }
+
+    setScannedDevices(prevDevices => {
+      const alreadyInList = prevDevices.find(
+        peripheral => peripheral.id === device.id,
+      );
+
+      if (alreadyInList) {
+        return prevDevices;
+      }
+
+      return [...prevDevices, device];
     });
   };
 
@@ -78,30 +119,20 @@ const App = () => {
         return setAnyDeviceScanned(false);
       }
 
-      const mappedDevices = devices.map(device => ({
-        ...device,
-        connected: false,
-      }));
-      setScannedDevices(mappedDevices);
       setAnyDeviceScanned(true);
     });
   };
 
-  const handleConnectToDevice = (deviceId: string) => {
-    BleManager.connect(deviceId).then(() => {
-      const devices = scannedDevices;
+  const handleConnectToDevice = async (deviceId: string) => {
+    try {
+      // await retrievePeripheralService(deviceId);
+      await createPeripheralBond(deviceId);
+      const responseConnection = await BleManager.connect(deviceId);
 
-      const mappedDevices = devices.map(device => {
-        if (device.id === deviceId) {
-          const data = {...device, connected: true};
-          setConnectedDevice(data);
-          return data;
-        }
-        return device;
-      });
-
-      setScannedDevices(mappedDevices);
-    });
+      console.log(responseConnection);
+    } catch (error) {
+      console.error('[Connect Error]', error);
+    }
   };
 
   const handleDisconnectDevice = (deviceId: string) => {
@@ -123,22 +154,28 @@ const App = () => {
       name: 'data to send',
     };
 
-    const dataToSend = Buffer.from(JSON.stringify(data));
+    const dataToSend = Buffer.from(JSON.stringify(data)).toJSON().data;
 
     // console.log(connectedDevice.advertising);
-    // BleManager.write(
-    //   connectedDevice?.id,
-    //   connectedDevice?.advertising.serviceUUIDs,
-    //   connectedDevice?.advertising.serviceUUIDs,
-    //   dataToSend
-    // ).then(() => {
+    BleManager.write(
+      connectedDevice?.id,
+      '00000003-0000-1000-8000-00805F9B34FB',
+      '00000003-0000-1000-8000-00805F9B34FB',
+      dataToSend,
+    ).then(() => {
+      console.log('Write', data);
+    });
   };
 
   useEffect(() => {
-    BleManagerEmitter.addListener('BleManagerStopScan', () => {
-      setIsScanning(false);
-      handleGetConnectedDevices();
-    });
+    BleManagerEmitter.addListener(
+      'BleManagerDiscoverPeripheral',
+      storeDiscoveredPeripheral,
+    );
+    // BleManagerEmitter.addListener('BleManagerStopScan', () => {
+    //   setIsScanning(false);
+    //   handleGetConnectedDevices();
+    // });
   }, []);
 
   return (
@@ -146,10 +183,10 @@ const App = () => {
       <Column>
         <Text>Bluetooth</Text>
 
-        <Button onPress={handleAllowBluetoothPermission}>
-          {isScanPermissionAllowed
-            ? 'Scan permission allowed ✅'
-            : 'Check|Request scan permission'}
+        <Button onPress={checkAndRequestBluetoothPermission}>
+          {isPermissionAllowed
+            ? 'Permission allowed ✅'
+            : 'Check|Request permission'}
         </Button>
         {Platform.OS === 'android' && (
           <Button onPress={handleEnableBluetooth}>
@@ -158,7 +195,7 @@ const App = () => {
         )}
       </Column>
 
-      {isScanPermissionAllowed && isBluetoothEnabled && (
+      {isPermissionAllowed && isBluetoothEnabled && (
         <Column>
           <Text>BLE Manager Module</Text>
           <Button onPress={handleStartBleModule}>
@@ -177,12 +214,10 @@ const App = () => {
 
           <Column>
             <Text>Devices</Text>
-            {isScanning ? (
-              <Text>Scanning 🔎</Text>
-            ) : isAnyDeviceScanned ? (
-              scannedDevices.map(device => (
+            {scannedDevices.length > 0 ? (
+              scannedDevices.map((device, index) => (
                 <Button
-                  key={device.id}
+                  key={index}
                   style={{
                     backgroundColor: device.connected ? '#027636' : '#000',
                   }}
@@ -209,14 +244,14 @@ const App = () => {
         </>
       )}
 
-      {scannedDevices.find(device => device.connected) && (
+      {/* {scannedDevices.find(device => device.connected) && (
         <Column>
           <Text>Send data</Text>
           <Button onPress={handleSendDataToDevice}>
             {isScanning ? 'Json sent 🔎' : 'Send json'}
           </Button>
         </Column>
-      )}
+      )} */}
     </ScrollView>
   );
 };
