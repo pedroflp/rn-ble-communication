@@ -7,6 +7,8 @@ import {
   Platform,
   ScrollView,
   Text,
+  TextInput,
+  TouchableHighlight,
 } from 'react-native';
 import BleManager, {
   BleScanCallbackType,
@@ -31,11 +33,8 @@ const App = () => {
   const [isBluetoothEnabled, setIsBluetoothEnabled] = useState(false);
   const [isModuleEnabled, setIsModuleEnabled] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  const [isAnyDeviceScanned, setAnyDeviceScanned] = useState(false);
   const [scannedDevices, setScannedDevices] = useState<Peripheral[]>([]);
-  const [connectedDevice, setConnectedDevice] = useState<
-    Peripheral[] | undefined
-  >();
+  const [connectedDevice, setConnectedDevice] = useState<any>();
   // 40:35:E6:4D:06:C8
 
   const checkAndRequestBluetoothPermission = async () => {
@@ -67,37 +66,33 @@ const App = () => {
   const retrievePeripheralService = async (deviceId: string) => {
     try {
       const peripheralInfo = await BleManager.retrieveServices(deviceId);
-      console.log(peripheralInfo);
+
       return peripheralInfo;
     } catch (error) {
       console.error('[Retrieve Error]', error);
     }
   };
 
-  const createPeripheralBond = async (deviceId: string) => {
-    try {
-      await BleManager.createBond(deviceId);
-      await retrievePeripheralService(deviceId);
-    } catch (error) {
-      console.error('[CreateBond Error]', error);
-    }
-  };
+  // const createPeripheralBond = async (deviceId: string) => {
+  //   try {
+  //     await BleManager.createBond(deviceId);
+  //     await retrievePeripheralService(deviceId);
+  //   } catch (error) {
+  //     console.error('[CreateBond Error]', error);
+  //   }
+  // };
 
   const handleStartScan = () => {
-    BleManager.scan([], 5, true, {
-      matchMode: BleScanMatchMode.Sticky,
-      scanMode: BleScanMode.LowLatency,
-      callbackType: BleScanCallbackType.AllMatches,
-    }).then(() => {
+    BleManager.scan([], 5, true).then(() => {
       // Success code
       setIsScanning(true);
     });
   };
 
   const storeDiscoveredPeripheral = (device: Peripheral) => {
-    // if (!device.name) {
-    //   return;
-    // }
+    if (!device.name) {
+      return;
+    }
 
     setScannedDevices(prevDevices => {
       const alreadyInList = prevDevices.find(
@@ -112,24 +107,44 @@ const App = () => {
     });
   };
 
-  const handleGetConnectedDevices = () => {
-    BleManager.getConnectedPeripherals([]).then(devices => {
-      console.log(devices);
-      if (devices.length === 0) {
-        return setAnyDeviceScanned(false);
-      }
+  // const handleGetConnectedDevices = () => {
+  //   BleManager.getConnectedPeripherals([]).then(devices => {
+  //     console.log(devices);
+  //     if (devices.length === 0) {
+  //       return setAnyDeviceScanned(false);
+  //     }
 
-      setAnyDeviceScanned(true);
-    });
-  };
+  //     setAnyDeviceScanned(true);
+  //   });
+  // };
 
   const handleConnectToDevice = async (deviceId: string) => {
     try {
-      // await retrievePeripheralService(deviceId);
-      await createPeripheralBond(deviceId);
-      const responseConnection = await BleManager.connect(deviceId);
+      // await createPeripheralBond(deviceId);
+      await BleManager.connect(deviceId);
+      setScannedDevices(prev =>
+        prev.map(device => {
+          if (device.id === deviceId) {
+            const data = {...device, connected: true};
+            setConnectedDevice(data);
+            return data;
+          }
+          return device;
+        }),
+      );
+      const deviceInformations = await retrievePeripheralService(deviceId);
+      const deviceCharacteristic = deviceInformations?.characteristics?.find(
+        characteristic =>
+          characteristic.properties.Read &&
+          characteristic.properties.Write &&
+          characteristic.properties.ExtendedProperties,
+      );
 
-      console.log(responseConnection);
+      setConnectedDevice(prev => ({
+        ...prev,
+        characteristicUuid: deviceCharacteristic?.characteristic,
+        serviceUuid: deviceCharacteristic?.service,
+      }));
     } catch (error) {
       console.error('[Connect Error]', error);
     }
@@ -144,7 +159,7 @@ const App = () => {
     });
   };
 
-  const handleSendDataToDevice = () => {
+  const handleSendDataToDevice = async () => {
     if (!connectedDevice) {
       return;
     }
@@ -156,15 +171,17 @@ const App = () => {
 
     const dataToSend = Buffer.from(JSON.stringify(data)).toJSON().data;
 
-    // console.log(connectedDevice.advertising);
-    BleManager.write(
-      connectedDevice?.id,
-      '00000003-0000-1000-8000-00805F9B34FB',
-      '00000003-0000-1000-8000-00805F9B34FB',
-      dataToSend,
-    ).then(() => {
-      console.log('Write', data);
-    });
+    try {
+      const resp = await BleManager.write(
+        connectedDevice?.id,
+        connectedDevice?.characteristicUuid,
+        connectedDevice?.serviceUuid,
+        dataToSend,
+      );
+      console.debug('[Write Data Success]', resp);
+    } catch (error) {
+      console.error('[Write Data Failure]', error);
+    }
   };
 
   useEffect(() => {
@@ -172,11 +189,12 @@ const App = () => {
       'BleManagerDiscoverPeripheral',
       storeDiscoveredPeripheral,
     );
-    // BleManagerEmitter.addListener('BleManagerStopScan', () => {
-    //   setIsScanning(false);
-    //   handleGetConnectedDevices();
-    // });
+    BleManagerEmitter.addListener('BleManagerStopScan', () => {
+      setIsScanning(false);
+      // handleGetConnectedDevices();
+    });
   }, []);
+  // 20:b8:68:27:95:63
 
   return (
     <ScrollView style={{padding: 30}} contentContainerStyle={{gap: 16}}>
@@ -214,6 +232,25 @@ const App = () => {
 
           <Column>
             <Text>Devices</Text>
+            <Text>Filter by mac address:</Text>
+            <TextInput
+              style={{backgroundColor: '#000', width: '100%'}}
+              onChangeText={value => {
+                const foundDevice = scannedDevices.find(device =>
+                  (device.name || device.id)
+                    .toLocaleLowerCase()
+                    .includes(value.toLocaleLowerCase()),
+                );
+
+                if (foundDevice) {
+                  console.log(
+                    '[DEVICE FOUNDED]',
+                    foundDevice?.id,
+                    foundDevice?.name,
+                  );
+                }
+              }}
+            />
             {scannedDevices.length > 0 ? (
               scannedDevices.map((device, index) => (
                 <Button
@@ -234,6 +271,11 @@ const App = () => {
                     <Text style={{color: '#fff'}}>Device: {device.name}</Text>
                     <Text style={{color: '#fff'}}>ID: {device.id}</Text>
                     <Text style={{color: '#fff'}}>RSSI: {device.rssi}</Text>
+                    {device.connected && (
+                      <Button onPress={handleSendDataToDevice}>
+                        <Text style={{color: '#fff'}}>Enviar dados</Text>
+                      </Button>
+                    )}
                   </Column>
                 </Button>
               ))
