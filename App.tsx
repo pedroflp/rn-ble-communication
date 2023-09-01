@@ -95,9 +95,9 @@ const App = () => {
   };
 
   const storeDiscoveredPeripheral = (device: Peripheral) => {
-    if (!device.name) {
-      return;
-    }
+    // if (!device.name) {
+    //   return;
+    // }
 
     setScannedDevices(prevDevices => {
       const alreadyInList = prevDevices.find(
